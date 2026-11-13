@@ -1,0 +1,25 @@
+[project]
+name = "bio-brain-ai"
+version = "0.1.0"
+description = "Bio-inspired multi-region AI brain starting with subconscious foveated predictive vision (no bounding boxes or discrete object IDs)."
+requires-python = ">=3.12"
+dependencies = [
+    "torch==2.14.1",
+    "torchvision==0.29.1",
+    "opencv-python>=4.10",
+    "scipy>=1.14",
+    "numpy>=2.0",
+    "pillow>=10.0",
+    "einops>=0.8",
+    "transformers>=4.45",
+    "timm>=1.0",
+    "huggingface-hub>=0.25",
+    "safetensors>=0.4",
+    "faiss-cpu>=1.8",
+    "pygame>=2.6",
+    "matplotlib>=3.9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

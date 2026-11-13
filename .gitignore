@@ -1,0 +1,26 @@
+# Python & environments
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Large downloaded wheels, models & local test media
+wheels/
+models/
+video/
+*.part
+*.whl
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# OS / IDE artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
