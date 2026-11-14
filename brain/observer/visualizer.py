@@ -106,8 +106,15 @@ class BrainObserver:
         self._ignition_history.append(
             (workspace.ignition_strength, workspace.adaptive_threshold, workspace.conscious_ignition)
         )
-        status_txt = "CONSCIOUS IGNITION" if workspace.conscious_ignition else "SILENT SUBCONSCIOUS"
-        status_col = (80, 240, 140) if workspace.conscious_ignition else (150, 160, 175)
+        if workspace.expectation_violation:
+            status_txt = "ANOMALY / SURPRISE!"
+            status_col = (50, 210, 255)
+        elif workspace.conscious_ignition:
+            status_txt = "CONSCIOUS IGNITION"
+            status_col = (80, 240, 140)
+        else:
+            status_txt = "SILENT SUBCONSCIOUS"
+            status_col = (150, 160, 175)
         cv2.putText(p4, f"4. Thalamus: {status_txt}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_col, 2)
 
         rates = workspace.region_rates_hz
@@ -129,7 +136,10 @@ class BrainObserver:
                 f"Kept: {workspace.memory_episode_count} (LTM:{workspace.long_term_episode_count}) | "
                 f"Forgot: {workspace.forgotten_count}"
             ),
-            f"Boredom: {boredom:.2f} [{mood_tag}] | EpStr: {workspace.active_episode_strength:.2f}",
+            (
+                f"Boredom: {boredom:.2f} [{mood_tag}] | "
+                f"Links:{workspace.transition_count} Pred:{workspace.predicted_next_idx}"
+            ),
             rate_line,
         ]
         for idx, line in enumerate(stats):

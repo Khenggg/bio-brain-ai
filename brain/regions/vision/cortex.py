@@ -30,12 +30,14 @@ class VisualCortex(BrainRegion):
         model_dir: Path | str | None = None,
         device: str | torch.device | None = None,
         bgr_input: bool = True,
+        collect_diagnostics: bool = True,
     ) -> None:
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
         self.bgr_input = bgr_input
+        self.collect_diagnostics = collect_diagnostics
 
         self.retina = DualResolutionRetina(
             periphery_size=periphery_size,
@@ -64,25 +66,29 @@ class VisualCortex(BrainRegion):
         """Run one silent perception-action tick on a raw camera/video frame."""
         t0 = time.perf_counter()
 
-        # 1. Sample periphery + sharp fovea at current gaze position
-        periphery, fovea, span_xy = self.retina.sample(
-            raw_input, self.colliculus.gaze, bgr_input=self.bgr_input
-        )
+        # 1. Sample wide periphery once
+        periphery, span_xy = self.retina.sample_periphery(raw_input, bgr_input=self.bgr_input)
 
         # 2. Dorsal stream predicts periphery dynamics & cancels static/repetitive clutter
         surprise_map, surprise_peak, motion_energy, flow_xy = self.dorsal.step(periphery)
 
         # 3. Superior Colliculus shifts gaze unconsciously (modulated by top-down boredom)
         topdown_boredom = feedback.familiarity_boredom if feedback is not None else 0.0
-        gaze, peak_xy, effective_salience = self.colliculus.step(
+        gaze, peak_xy, _ = self.colliculus.step(
             surprise_map, flow_xy=flow_xy, topdown_boredom=topdown_boredom
         )
 
-        # 4. Resample fovea at updated gaze when an abrupt saccade occurred for crisp perception
-        if gaze.mode == "saccade":
-            _, fovea, span_xy = self.retina.sample(raw_input, gaze, bgr_input=self.bgr_input)
+        # 4. Crop & upload sharp fovea ONCE at the post-colliculus gaze
+        fovea, fovea_cpu, _ = self.retina.sample_fovea(
+            raw_input,
+            gaze,
+            bgr_input=self.bgr_input,
+            need_gpu=True,
+            need_cpu=self.collect_diagnostics,
+        )
+        assert fovea is not None
 
-        # 5. Ventral stream encodes sharp foveal content into continuous latent attractor
+        # 5. Ventral stream encodes sharp foveal content into pure semantic latent attractor
         latent_state = self.ventral.encode(
             fovea=fovea,
             surprise_energy=surprise_peak,
@@ -97,6 +103,17 @@ class VisualCortex(BrainRegion):
             else 0.0
         )
 
+        diagnostics: dict[str, Any] = {
+            "span_xy": span_xy,
+            "latency_ms": latency_ms,
+            "vram_mb": vram_mb,
+            "backend": self.ventral.backend_name,
+            "device": str(self.device),
+        }
+        if self.collect_diagnostics:
+            diagnostics["fovea"] = fovea_cpu
+            diagnostics["surprise_map"] = surprise_map.detach().to("cpu")
+
         return SensoryPacket(
             region_name=self.name,
             timestamp=time.time(),
@@ -105,18 +122,7 @@ class VisualCortex(BrainRegion):
             motion_energy=motion_energy,
             salience_peak_xy=peak_xy,
             gaze=gaze,
-            diagnostics={
-                "periphery": periphery.detach().to("cpu"),
-                "fovea": fovea.detach().to("cpu"),
-                "surprise_map": surprise_map.detach().to("cpu"),
-                "effective_salience": effective_salience.detach().to("cpu"),
-                "ior_map": self.colliculus._ior_map.detach().to("cpu"),
-                "span_xy": span_xy,
-                "latency_ms": latency_ms,
-                "vram_mb": vram_mb,
-                "backend": self.ventral.backend_name,
-                "device": str(self.device),
-            },
+            diagnostics=diagnostics,
         )
 
     def reset(self) -> None:

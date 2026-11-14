@@ -19,8 +19,8 @@ class SuperiorColliculusGaze:
         device: torch.device | str = "cpu",
         attention_threshold: float = 0.012,
         saccade_distance: float = 0.30,
-        ior_decay: float = 0.92,
-        ior_strength: float = 0.70,
+        ior_decay: float = 0.96,
+        ior_strength: float = 0.78,
         saccade_cooldown_ticks: int = 4,
     ) -> None:
         self.periphery_size = periphery_size
@@ -59,12 +59,14 @@ class SuperiorColliculusGaze:
             dist2 = (self._xx - self.gaze.x) ** 2 + (self._yy - self.gaze.y) ** 2
             local_spot = torch.exp(-dist2 / (2.0 * 0.25 * 0.25))
 
-            # Top-down familiarity fatigue inhibits the already-known central spot
+            # Top-down familiarity fatigue inhibits the already-known central spot when dwelling
+            central_fatigue = None
             if boredom > 0.25:
                 central_fatigue = torch.exp(-dist2 / (2.0 * 0.20 * 0.20))
-                self._ior_map = torch.clamp(
-                    self._ior_map + (0.06 * boredom) * central_fatigue, 0.0, 1.0
-                )
+                if self._saccade_cooldown == 0:
+                    self._ior_map = torch.clamp(
+                        self._ior_map + (0.042 * boredom) * central_fatigue, 0.0, 1.0
+                    )
 
             # Effective salience suppresses recently boring or over-familiar gaze locations
             effective = surprise_map * (1.0 - self.ior_strength * self._ior_map)
@@ -130,6 +132,11 @@ class SuperiorColliculusGaze:
                 self._cand_hits = 0
 
             if allow_saccade:
+                # Stamp Posner departure-IOR at vacated fixation during exploratory saccades
+                if central_fatigue is not None:
+                    self._ior_map = torch.clamp(
+                        self._ior_map + (0.55 * boredom) * central_fatigue, 0.0, 1.0
+                    )
                 # Ballistic unconscious saccade toward confirmed peripheral surprise
                 gain = 0.65
                 self.gaze.vx = dx * gain

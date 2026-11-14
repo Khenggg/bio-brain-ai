@@ -335,3 +335,188 @@ def test_workspace_familiarity_boredom_rises_and_resets_on_novelty() -> None:
     # Brand new high-surprise pattern C sharply lowers boredom
     novel_state = thalamus.process_packet(_pkt(v_c, 0.35, 10.0))
     assert novel_state.familiarity_boredom < boredom_after_repeat * 0.60
+
+
+def test_memory_sequence_transitions_and_prediction(tmp_path: Path) -> None:
+    mem = EpisodicAttractorMemory(
+        latent_dim=16,
+        consolidation_threshold=0.85,
+        init_strength=0.60,
+        decay_rate=0.08,
+        forget_threshold=0.20,
+        grace_steps=2,
+        long_term_hits=4,
+    )
+    v_a = F.normalize(torch.eye(16)[0], dim=0)
+    v_tmp = F.normalize(torch.eye(16)[1], dim=0)
+    v_b = F.normalize(torch.eye(16)[2], dim=0)
+
+    mem.consolidate(v_a, step_id=1)    # idx 0 (promoted LTM)
+    mem.consolidate(v_tmp, step_id=1)  # idx 1 (transient STM to be pruned)
+    mem.consolidate(v_b, step_id=1)    # idx 2 (promoted LTM)
+    for idx in (0, 2):
+        for s in (2, 3, 4):
+            mem.note_recognition(idx, step_id=s, bump_hit=True)
+
+    for _ in range(4):
+        mem.note_transition(0, 2, weight=1.0)
+    assert mem.transition_count == 1
+    assert mem.predict_next(0)[0] == 2
+    assert mem.predict_next(0)[1] >= 0.75
+
+    # Prune middle slot (idx 1) -> idx 2 shifts down to idx 1, transition remaps 0 -> 1 cleanly
+    for s in range(5, 15):
+        mem.step_decay(step_id=s, exclude_idx=0)
+        mem.note_recognition(2 if mem.count == 3 else 1, step_id=s, bump_hit=False)
+    assert mem.count == 2
+    pred_after_prune, conf_after_prune = mem.predict_next(0)
+    assert pred_after_prune == 1
+    assert conf_after_prune >= 0.75
+
+    save_file = tmp_path / "seq_mem.npz"
+    mem.save(save_file)
+    reloaded = EpisodicAttractorMemory(latent_dim=16)
+    assert reloaded.load(save_file, inter_session_decay=0.90) is True
+    assert reloaded.transition_count == 1
+    assert reloaded.predict_next(0)[0] == 1
+
+
+def test_workspace_expectation_violation_wakes_familiar_brain() -> None:
+    thalamus = ThalamusWorkspace(memory=EpisodicAttractorMemory(latent_dim=16, consolidation_threshold=0.82))
+    v_a = F.normalize(torch.eye(16)[0], dim=0)
+    v_b = F.normalize(torch.eye(16)[1], dim=0)
+    v_c = F.normalize(torch.eye(16)[2], dim=0)
+
+    def _pkt(vec: torch.Tensor, surprise: float, ts: float) -> SensoryPacket:
+        return SensoryPacket(
+            region_name="vision",
+            timestamp=ts,
+            latent_state=vec,
+            surprise_energy=surprise,
+            motion_energy=0.02,
+            salience_peak_xy=(0.0, 0.0),
+            gaze=GazeState(),
+            modality_event="reflex",
+            is_fresh_semantic=True,
+        )
+
+    thalamus.process_packet(_pkt(v_a, 0.25, 1.0))
+    thalamus.process_packet(_pkt(v_b, 0.25, 1.1))
+    thalamus.process_packet(_pkt(v_c, 0.25, 1.2))
+    # Build strong habit A -> B and high familiarity boredom on A
+    for k in range(5):
+        thalamus.process_packet(_pkt(v_a, 0.03, 2.0 + k * 0.2))
+        thalamus.process_packet(_pkt(v_b, 0.03, 2.1 + k * 0.2))
+    state = thalamus.process_packet(_pkt(v_a, 0.03, 4.0))
+    for k in range(25):
+        state = thalamus.process_packet(_pkt(v_a, 0.03, 4.1 + k * 0.05))
+    bored_before = state.familiarity_boredom
+    assert bored_before > 0.25
+    assert state.predicted_next_idx == 1
+
+    # Unexpected surprise jump on familiar A triggers expectation violation & wakes workspace
+    shock_state = thalamus.process_packet(_pkt(v_a, 0.14, 7.0))
+    assert shock_state.expectation_violation is True
+    assert shock_state.conscious_ignition is True
+    assert shock_state.familiarity_boredom < bored_before * 0.60
+
+
+def test_memory_transition_decay_and_attractor_merge(tmp_path: Path) -> None:
+    mem = EpisodicAttractorMemory(
+        latent_dim=16,
+        grace_steps=100,
+        transition_decay=0.10,
+        transition_prune_threshold=0.25,
+    )
+    e0 = F.normalize(torch.eye(16)[0], dim=0)
+    e1 = F.normalize(torch.eye(16)[1], dim=0)
+    e2 = F.normalize(torch.eye(16)[2], dim=0)
+    mem.consolidate(e0, step_id=1)
+    mem.consolidate(e1, step_id=1)
+    mem.consolidate(e2, step_id=1)
+
+    mem.note_transition(0, 1, weight=0.40)  # weak coincidence -> should fade and prune
+    mem.note_transition(0, 2, weight=8.0)   # strong habit -> should survive
+    assert mem.transition_count == 2
+    for s in range(2, 12):
+        mem.step_decay(step_id=s)
+    assert mem.transition_count == 1
+    assert mem.predict_next(0)[0] == 2
+
+    # Attractors drifting closer than merge_threshold collapse and remap transitions cleanly
+    merge_mem = EpisodicAttractorMemory(
+        latent_dim=16,
+        consolidation_threshold=0.90,
+        hebbian_rate=0.60,
+        merge_threshold=0.92,
+    )
+    v_a = F.normalize(0.97 * e0 - 0.2431 * e1, dim=0)
+    v_b = F.normalize(0.97 * e0 + 0.2431 * e1, dim=0)
+    merge_mem.consolidate(v_a, step_id=1)  # idx 0
+    merge_mem.consolidate(v_b, step_id=1)  # idx 1 (cos ~0.88 < 0.90)
+    merge_mem.consolidate(e2, step_id=1)   # idx 2
+    assert merge_mem.count == 3
+
+    merge_mem.note_transition(1, 2, weight=4.0)
+    merge_mem.consolidate(e0, step_id=2)   # pulls v_a close enough to absorb v_b
+    assert merge_mem.count == 2
+    assert merge_mem.merged_count == 1
+    assert merge_mem.predict_next(0)[0] == 1
+
+    save_path = tmp_path / "merged.npz"
+    merge_mem.save(save_path)
+    reloaded = EpisodicAttractorMemory(latent_dim=16)
+    assert reloaded.load(save_path) is True
+    assert reloaded.merged_count == 1
+    assert reloaded.predict_next(0)[0] == 1
+
+
+def test_extended_stm_retention_and_silent_fixation_encoding() -> None:
+    # Extended STM keeps unattended single-hit episodes well past 1,500 steps (~1+ min at 22-30Hz)
+    long_mem = EpisodicAttractorMemory(latent_dim=16)
+    v_once = F.normalize(torch.eye(16)[0], dim=0)
+    long_mem.consolidate(v_once, step_id=1)
+    for step in range(2, 1600):
+        long_mem.step_decay(step_id=step)
+    assert long_mem.count == 1
+    assert long_mem.forgotten_count == 0
+    assert long_mem.exposure_of(0)[0] > long_mem.forget_threshold
+
+    # Sustained calm fixation imprints novel scene silently without conscious ignition
+    mem = EpisodicAttractorMemory(latent_dim=16)
+    thalamus = ThalamusWorkspace(
+        memory=mem,
+        base_ignition_floor=0.14,
+        silent_fixation_steps=10,
+        silent_fixation_cooldown=12,
+        silent_init_strength=0.45,
+    )
+    calm_vec = F.normalize(torch.eye(16)[3], dim=0)
+
+    def _calm_pkt(vec: torch.Tensor, ts: float, fresh: bool) -> SensoryPacket:
+        return SensoryPacket(
+            region_name="vision",
+            timestamp=ts,
+            latent_state=vec,
+            surprise_energy=0.01,
+            motion_energy=0.0,
+            salience_peak_xy=(0.0, 0.0),
+            gaze=GazeState(mode="fixate"),
+            modality_event="semantic" if fresh else "reflex",
+            is_fresh_semantic=fresh,
+        )
+
+    # Async-style: 1 fresh semantic frame settles focus, then calm reflex dwell completes silent encode
+    ws0 = thalamus.process_packet(_calm_pkt(calm_vec, 1.0, fresh=True))
+    assert ws0.conscious_ignition is False
+    assert mem.count == 0
+
+    for i in range(1, 12):
+        ws = thalamus.process_packet(_calm_pkt(calm_vec, 1.0 + i * 0.04, fresh=False))
+        assert ws.conscious_ignition is False
+
+    assert mem.count == 1
+    str_silent, hits_silent = mem.exposure_of(0)
+    assert abs(str_silent - 0.45) < 0.06
+    assert hits_silent == 1
+

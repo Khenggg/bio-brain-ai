@@ -50,9 +50,12 @@ Thay vì tiếp cận theo kỹ thuật Computer Vision truyền thống (`YOLO`
 - **Chặng 1.3 (Xong):**
   - **Ký ức có Lưu, Quên & Cố định dài hạn (*LTM Consolidation*):** Củng cố hố hút khi gặp lại, suy giảm và đào thải ký ức thoáng qua (`forgotten_count`), đồng thời **cố định bền vững** ký ức cốt lõi lặp lại (`hits >= 4` hoặc bền `>= 0.95`) xuống ngưỡng sàn dài hạn (`ltm_floor = 0.35`), kèm lưu/nạp liên phiên qua `.npz` (mặc định `data/episodic_memory.npz`).
   - **Chán quen Top-Down (*Familiarity Boredom*):** Hồi tiếp mức độ quen thuộc từ Đồi thị xuống `Colliculus` để giảm dính điểm nhìn trung tâm (*local lock*), tăng IOR tại chỗ và kích thích mắt khám phá ngoại vi mới mẻ.
+- **Chặng 1.4 (Xong):**
+  - **Ký ức ngữ nghĩa sạch & Đồ thị chuyển tiếp (`A → B`):** Loại bỏ nhiễu vận tốc khỏi vector ngữ nghĩa, áp dụng *Gaussian Foveal Pooling* (loại register tokens) cho `DINOv2`, lưu liên kết chuyển tiếp thưa có **suy giảm cạnh yếu (`transition_decay`)**, **gộp hố hút trôi trùng (`attractor merge`)**, dự đoán hố kế tiếp và phát hiện **Bất thường kỳ vọng (*Expectation Violation*)** khi cảnh quen đột ngột biến động.
+  - **Tối ưu GTX 1650 Ti, Treo máy dài & Ghi nhớ xem lâu:** Lazy `fovea` GPU upload & `collect_diagnostics=False` ở headless, cổng **Foveal Deduplication** bỏ qua lần chạy `Ventral` nếu điểm vàng không đổi, shortcut khung hình tĩnh & mask zero-allocation ở `Dorsal`, lazy `FAISS` (`count >= 512`), đồng hồ tuổi ký ức `_decay_step`, **Extended STM Retention** (`grace_steps=450`, `decay_rate=0.00006`, `transition_decay=0.0006`) + **Silent Fixation Encoding** (ghi dấu nhẹ cảnh tĩnh lặng khi nhìn đủ lâu không cần giật mình), cùng **atomic `.npz` autosave (`--autosave-every`)** và thoát sạch khi đóng cửa sổ `[X]`.
 
 ### Chương 2 — Tưởng tượng & Giấc mơ (*Internal World Model*)
-- **Chặng 2.1 — Tự sinh hình ảnh (*Visual Imagery*):** Giải mã ngược từ không gian ẩn (`Latent -> Visual Canvas`) giúp não tự "hình dung" vật thể trong trí nhớ khi không có kích thích từ camera.
+- **Chặng 2.1 — Tự sinh hình ảnh & Suy giảm Độ chính xác (*Visual Imagery & Precision Degradation*):** Giải mã ngược từ không gian ẩn (`Latent -> Visual Canvas`) giúp não tự "hình dung" vật thể trong trí nhớ khi không có kích thích từ camera, đồng thời mô hình hóa quá trình phai dần độ sắc nét (`_clarity`) / trôi về đại ý ước lượng (*Gist Drift & Reconsolidation*) thay vì xóa nhị phân 0/1.
 - **Chặng 2.2 — Tự sinh chuyển động / Mơ (*Dreaming & Temporal Rollout*):** Mô phỏng quỹ đạo chuyển động theo thời gian trong trạng thái nhàn rỗi/ngủ để tái hiện và củng cố ký ức.
 
 ### Chương 3 — Ý thức Bản thân & Tự giám sát (*Self & Meta-Cognition*)

@@ -73,31 +73,29 @@ class VentralSemanticStream:
 
         # Temporal binding attractor (replaces discrete object IDs with continuous presence)
         self._bound_state: torch.Tensor | None = None
+        self._foveal_weight_cache: dict[tuple[int, str], torch.Tensor] = {}
 
-    @staticmethod
-    def attach_kinematics(
-        vec: torch.Tensor,
-        surprise_energy: float,
-        gaze_vx: float,
-        gaze_vy: float,
-    ) -> torch.Tensor:
-        """Fold subtle motion-kinematic resonance into latent without losing semantic identity."""
-        base = F.normalize(vec.squeeze(0), dim=-1)
-        motion_sig = torch.zeros_like(base)
-        motion_sig[0] = float(gaze_vx) * 2.0
-        motion_sig[1] = float(gaze_vy) * 2.0
-        motion_sig[2] = float(surprise_energy)
-        return F.normalize(base + 0.08 * motion_sig, dim=-1)
+    def _get_foveal_weights(self, side: int, device: torch.device) -> torch.Tensor:
+        key = (side, str(device))
+        cached = self._foveal_weight_cache.get(key)
+        if cached is not None:
+            return cached
+        coords = torch.linspace(-1.0, 1.0, side, device=device)
+        yy, xx = torch.meshgrid(coords, coords, indexing="ij")
+        w = torch.exp(-(xx**2 + yy**2) / (2.0 * 0.48 * 0.48)).flatten()
+        w = w / w.sum()
+        self._foveal_weight_cache[key] = w
+        return w
 
     @torch.no_grad()
     def encode(
         self,
         fovea: torch.Tensor,
         surprise_energy: float,
-        gaze_vx: float,
-        gaze_vy: float,
+        gaze_vx: float = 0.0,
+        gaze_vy: float = 0.0,
     ) -> torch.Tensor:
-        """Encode sharp fovea patch and integrate into continuous temporal latent trajectory."""
+        """Encode sharp fovea content into pure semantic trajectory (kept free of raw gaze speed)."""
         if self._dinov2 is not None:
             normed = (fovea - self._mean) / self._std
             use_amp = getattr(self, "_use_amp", None)
@@ -112,23 +110,31 @@ class VentralSemanticStream:
                 self._use_amp = use_amp
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=use_amp):
                 out = self._dinov2(pixel_values=normed)
-                # Blend CLS token + mean patch representation for rich local + global shape
                 cls_tok = out.last_hidden_state[:, 0]
-                patch_mean = out.last_hidden_state[:, 1:].mean(dim=1)
-                raw_vec = (0.6 * cls_tok + 0.4 * patch_mean).float()
+                num_reg = int(getattr(self._dinov2.config, "num_register_tokens", 0))
+                patch_tokens = out.last_hidden_state[:, 1 + num_reg :]
+                n_p = patch_tokens.shape[1]
+                side = int(round(n_p**0.5))
+                if side * side == n_p:
+                    # Weight center foveal patches higher than peripheral corner clutter
+                    fw = self._get_foveal_weights(side, patch_tokens.device).to(patch_tokens.dtype)
+                    patch_vec = (patch_tokens * fw.view(1, n_p, 1)).sum(dim=1)
+                else:
+                    patch_vec = patch_tokens.mean(dim=1)
+                raw_vec = (0.55 * cls_tok + 0.45 * patch_vec).float()
         else:
             assert self._light_encoder is not None
             raw_vec = self._light_encoder(fovea).float()
 
-        combined = self.attach_kinematics(raw_vec, surprise_energy, gaze_vx, gaze_vy)
+        semantic = F.normalize(raw_vec.squeeze(0), dim=-1)
 
         if self._bound_state is None:
-            self._bound_state = combined
+            self._bound_state = semantic
         else:
             # High surprise updates bound perception faster; calm pauses preserve continuity
             alpha = min(0.55, max(0.12, 0.12 + 2.5 * surprise_energy))
             self._bound_state = F.normalize(
-                (1.0 - alpha) * self._bound_state + alpha * combined, dim=-1
+                (1.0 - alpha) * self._bound_state + alpha * semantic, dim=-1
             )
         return self._bound_state.detach().to("cpu")
 

@@ -137,8 +137,10 @@ class DorsalMotionStream:
         warped = F.grid_sample(t, grid, mode="bilinear", padding_mode="border", align_corners=False)
         return warped.squeeze(0).squeeze(0) if is_2d else warped
 
-    def _pan_valid_mask(self, dx_px: float, dy_px: float) -> torch.Tensor:
-        """Suppress newly entered edge strips caused purely by camera panning."""
+    def _pan_valid_mask(self, dx_px: float, dy_px: float) -> torch.Tensor | None:
+        """Suppress newly entered edge strips caused purely by camera panning (None if static)."""
+        if abs(dx_px) <= 0.5 and abs(dy_px) <= 0.5:
+            return None
         p = self.periphery_size
         mask = torch.ones((1, 1, p, p), device=self.device)
         pad_x = int(abs(dx_px)) + 2
@@ -164,6 +166,18 @@ class DorsalMotionStream:
             self._prev_surprise = zeros
             return zeros, 0.0, 0.0, (0.0, 0.0)
 
+        # Fast-path static shortcut: skip FFT pan & GRU backward pass when scene is virtually frozen
+        quick_lum_diff = float((x_t[:, :1] - self._prev_features[:, :1]).abs().mean().item())
+        if quick_lum_diff < 1e-4 and self._prev_surprise is not None:
+            self._prev_features = x_t.detach()
+            self._prev_surprise = (self._prev_surprise * 0.5).detach()
+            return (
+                self._prev_surprise,
+                float(self._prev_surprise.max().item()),
+                0.0,
+                (0.0, 0.0),
+            )
+
         # 0. Vestibular / MSTd Global Ego-Motion Cancellation (compensates panning cameras)
         dx_pan, dy_pan = self._estimate_global_pan(self._prev_features[:, :1], x_t[:, :1])
         aligned_prev = self._warp_shift(self._prev_features, dx_pan, dy_pan)
@@ -173,7 +187,8 @@ class DorsalMotionStream:
         pan_mask = self._pan_valid_mask(dx_pan, dy_pan)
 
         # 1. Instantaneous motion residual (fast magnocellular transient after pan alignment)
-        inst_diff = (x_t - aligned_prev).abs().mean(dim=1, keepdim=True) * pan_mask
+        raw_inst = (x_t - aligned_prev).abs().mean(dim=1, keepdim=True)
+        inst_diff = raw_inst * pan_mask if pan_mask is not None else raw_inst
 
         # 2. Online predictive coding step: predict x_t from aligned (x_{t-1}, h_{t-1})
         self._step_count += 1
@@ -183,7 +198,11 @@ class DorsalMotionStream:
         if should_update:
             self.predictor.train()
             pred_t, h_next = self.predictor(aligned_prev, aligned_hidden)
-            loss = F.smooth_l1_loss(pred_t * pan_mask, x_t * pan_mask)
+            loss = (
+                F.smooth_l1_loss(pred_t * pan_mask, x_t * pan_mask)
+                if pan_mask is not None
+                else F.smooth_l1_loss(pred_t, x_t)
+            )
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(self.predictor.parameters(), max_norm=1.0)
@@ -194,7 +213,8 @@ class DorsalMotionStream:
                 pred_t, h_next = self.predictor(aligned_prev, aligned_hidden)
 
         with torch.no_grad():
-            pred_err = (x_t - pred_t.detach()).abs().mean(dim=1, keepdim=True) * pan_mask
+            raw_err = (x_t - pred_t.detach()).abs().mean(dim=1, keepdim=True)
+            pred_err = raw_err * pan_mask if pan_mask is not None else raw_err
             # Blend learned predictive error with transient motion energy
             raw_energy = 0.65 * pred_err + 0.35 * inst_diff
 
@@ -232,9 +252,8 @@ class DorsalMotionStream:
     def _estimate_peak_flow(self, curr_surprise: torch.Tensor) -> tuple[float, float]:
         if self._prev_surprise is None or float(curr_surprise.max()) < 0.01:
             return 0.0, 0.0
-        p = self.periphery_size
-        coords = torch.linspace(-1.0, 1.0, p, device=self.device)
-        yy, xx = torch.meshgrid(coords, coords, indexing="ij")
+        xx = self._base_grid[0, ..., 0]
+        yy = self._base_grid[0, ..., 1]
 
         def _centroid(s: torch.Tensor) -> tuple[float, float]:
             w = torch.pow(s.clamp(min=0.0), 2.0)

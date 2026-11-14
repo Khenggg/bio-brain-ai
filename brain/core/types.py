@@ -54,3 +54,7 @@ class WorkspaceState:
     long_term_episode_count: int = 0
     active_episode_idx: int = -1
     active_episode_strength: float = 0.0
+    predicted_next_idx: int = -1
+    prediction_confidence: float = 0.0
+    expectation_violation: bool = False
+    transition_count: int = 0

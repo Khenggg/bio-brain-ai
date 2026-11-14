@@ -13,7 +13,6 @@ import torch
 
 from brain.core.types import GazeState, SensoryPacket, WorkspaceState
 from brain.regions.vision.cortex import VisualCortex
-from brain.regions.vision.ventral import VentralSemanticStream
 
 
 @dataclass(slots=True)
@@ -44,6 +43,7 @@ class AsyncVisualCortex(VisualCortex):
         ventral_surprise_thresh: float = 0.020,
         ventral_calm_interval_s: float = 0.25,
         auto_start: bool = True,
+        collect_diagnostics: bool = True,
     ) -> None:
         super().__init__(
             periphery_size=periphery_size,
@@ -53,6 +53,7 @@ class AsyncVisualCortex(VisualCortex):
             model_dir=model_dir,
             device=device,
             bgr_input=bgr_input,
+            collect_diagnostics=collect_diagnostics,
         )
         self.on_semantic_packet = on_semantic_packet
         self.ventral_surprise_thresh = ventral_surprise_thresh
@@ -74,7 +75,9 @@ class AsyncVisualCortex(VisualCortex):
 
         self._state_lock = threading.Lock()
         self._latest_semantic_cpu: torch.Tensor | None = None
+        self._last_ventral_fovea: torch.Tensor | None = None
         self._last_ventral_submit_ts = 0.0
+        self._post_saccade_wake = False
         self.last_ventral_ms = 0.0
         self.reflex_steps = 0
         self.ventral_updates = 0
@@ -122,11 +125,14 @@ class AsyncVisualCortex(VisualCortex):
             if self._latest_semantic_cpu is None:
                 return True
             dt = now - self._last_ventral_submit_ts
-        return (
-            gaze.mode == "saccade"
-            or surprise_peak >= self.ventral_surprise_thresh
-            or dt >= self.ventral_calm_interval_s
-        )
+            if gaze.mode == "saccade":
+                # Also schedule a crisp post-saccade refresh once the eye lands squarely on target
+                self._post_saccade_wake = True
+                return True
+            if self._post_saccade_wake:
+                self._post_saccade_wake = False
+                return True
+        return surprise_peak >= self.ventral_surprise_thresh or dt >= self.ventral_calm_interval_s
 
     def _run_ventral_encode(self, job: _VentralJob) -> tuple[torch.Tensor, float]:
         t0 = time.perf_counter()
@@ -164,50 +170,77 @@ class AsyncVisualCortex(VisualCortex):
                 raise self._worker_error
 
         t0 = time.perf_counter()
+        mono_now = t0
+        now = time.time()
+        with self._state_lock:
+            self.reflex_steps += 1
+            reflex_steps = self.reflex_steps
+            cached_semantic = self._latest_semantic_cpu
+
         fast_ctx = (
             torch.cuda.stream(self._fast_stream)
             if self._fast_stream is not None
             else nullcontext()
         )
         with fast_ctx:
-            periphery, fovea, span_xy = self.retina.sample(
-                raw_input, self.colliculus.gaze, bgr_input=self.bgr_input
-            )
+            periphery, span_xy = self.retina.sample_periphery(raw_input, bgr_input=self.bgr_input)
             surprise_map, surprise_peak, motion_energy, flow_xy = self.dorsal.step(periphery)
             topdown_boredom = feedback.familiarity_boredom if feedback is not None else 0.0
-            gaze, peak_xy, effective_salience = self.colliculus.step(
+            gaze, peak_xy, _ = self.colliculus.step(
                 surprise_map, flow_xy=flow_xy, topdown_boredom=topdown_boredom
             )
+            gaze_snapshot = GazeState(
+                x=gaze.x,
+                y=gaze.y,
+                vx=gaze.vx,
+                vy=gaze.vy,
+                mode=gaze.mode,
+            )
+            wake_ventral = (cached_semantic is None) or self._should_wake_ventral(
+                gaze_snapshot, surprise_peak, mono_now
+            )
 
-            if gaze.mode == "saccade":
-                _, fovea, span_xy = self.retina.sample(raw_input, gaze, bgr_input=self.bgr_input)
+            fovea = None
+            fovea_cpu = None
+            if wake_ventral or self.collect_diagnostics:
+                fovea, fovea_cpu, _ = self.retina.sample_fovea(
+                    raw_input,
+                    gaze_snapshot,
+                    bgr_input=self.bgr_input,
+                    need_gpu=wake_ventral,
+                    need_cpu=self.collect_diagnostics,
+                )
 
-            diag_cpu = {
-                "periphery": periphery.detach().to("cpu"),
-                "fovea": fovea.detach().to("cpu"),
-                "surprise_map": surprise_map.detach().to("cpu"),
-                "effective_salience": effective_salience.detach().to("cpu"),
-                "ior_map": self.colliculus._ior_map.detach().to("cpu"),
-            }
+            dispatch_ventral = wake_ventral
+            if dispatch_ventral and cached_semantic is not None:
+                assert fovea is not None
+                with self._state_lock:
+                    prev_fov = self._last_ventral_fovea
+                    dt_since = mono_now - self._last_ventral_submit_ts
+                # Keep foveal diff inside fast_ctx so CUDA stream 0 never stalls behind Ventral
+                if (
+                    prev_fov is not None
+                    and gaze_snapshot.mode != "saccade"
+                    and dt_since < max(1.5, self.ventral_calm_interval_s)
+                ):
+                    foveal_diff = float((fovea - prev_fov).abs().mean().item())
+                    if foveal_diff < 0.008:
+                        dispatch_ventral = False
+
+            diag_cpu: dict[str, Any] = {}
+            if self.collect_diagnostics:
+                diag_cpu["fovea"] = fovea_cpu
+                diag_cpu["surprise_map"] = surprise_map.detach().to("cpu")
+
             cuda_ev = None
-            if self._fast_stream is not None:
-                cuda_ev = torch.cuda.Event()
-                cuda_ev.record(self._fast_stream)
+            if dispatch_ventral:
+                assert fovea is not None
+                with self._state_lock:
+                    self._last_ventral_fovea = fovea.detach().clone()
+                if self._fast_stream is not None:
+                    cuda_ev = torch.cuda.Event()
+                    cuda_ev.record(self._fast_stream)
 
-        now = time.time()
-        mono_now = time.perf_counter()
-        with self._state_lock:
-            self.reflex_steps += 1
-            reflex_steps = self.reflex_steps
-            cached_semantic = self._latest_semantic_cpu
-
-        gaze_snapshot = GazeState(
-            x=gaze.x,
-            y=gaze.y,
-            vx=gaze.vx,
-            vy=gaze.vy,
-            mode=gaze.mode,
-        )
         base_diag: dict[str, Any] = {
             **diag_cpu,
             "span_xy": span_xy,
@@ -216,26 +249,37 @@ class AsyncVisualCortex(VisualCortex):
             "async_mode": True,
         }
 
-        job = _VentralJob(
-            fovea=fovea,
-            cuda_event=cuda_ev,
-            surprise_peak=surprise_peak,
-            motion_energy=motion_energy,
-            peak_xy=peak_xy,
-            gaze=gaze_snapshot,
-            timestamp=now,
-            diagnostics=base_diag,
-        )
-
         # Warm-start Ventral synchronously only once on boot so step 0 has real semantics
         if cached_semantic is None:
+            assert fovea is not None
+            job = _VentralJob(
+                fovea=fovea,
+                cuda_event=cuda_ev,
+                surprise_peak=surprise_peak,
+                motion_energy=motion_energy,
+                peak_xy=peak_xy,
+                gaze=gaze_snapshot,
+                timestamp=now,
+                diagnostics=base_diag,
+            )
             with self._state_lock:
                 self._last_ventral_submit_ts = mono_now
             latent_state, ventral_ms = self._run_ventral_encode(job)
             is_fresh = True
             modality_event = "semantic"
         else:
-            if self._should_wake_ventral(gaze_snapshot, surprise_peak, mono_now):
+            if dispatch_ventral:
+                assert fovea is not None
+                job = _VentralJob(
+                    fovea=fovea,
+                    cuda_event=cuda_ev,
+                    surprise_peak=surprise_peak,
+                    motion_energy=motion_energy,
+                    peak_xy=peak_xy,
+                    gaze=gaze_snapshot,
+                    timestamp=now,
+                    diagnostics=base_diag,
+                )
                 with self._state_lock:
                     self._last_ventral_submit_ts = mono_now
                 with self._mailbox_cond:
@@ -245,9 +289,7 @@ class AsyncVisualCortex(VisualCortex):
                 with self._state_lock:
                     self.ventral_skipped_calm += 1
 
-            latent_state = VentralSemanticStream.attach_kinematics(
-                cached_semantic, surprise_peak, gaze.vx, gaze.vy
-            )
+            latent_state = cached_semantic
             is_fresh = False
             modality_event = "saccade" if gaze.mode == "saccade" else "reflex"
             with self._state_lock:
@@ -304,7 +346,9 @@ class AsyncVisualCortex(VisualCortex):
             self._pending_job = None
         with self._state_lock:
             self._latest_semantic_cpu = None
+            self._last_ventral_fovea = None
             self._last_ventral_submit_ts = 0.0
+            self._post_saccade_wake = False
             self.last_ventral_ms = 0.0
             self.reflex_steps = 0
             self.ventral_updates = 0

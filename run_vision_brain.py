@@ -62,7 +62,8 @@ class _RunStats:
         mean_jump = self.gaze_jump_sum / max(1, self.steps - 1)
         print(
             f"[Summary:{mode_label}] steps={self.steps} ignitions={self.ignitions} "
-            f"kept={memory.count} ltm={memory.long_term_count} forgotten={memory.forgotten_count} "
+            f"kept={memory.count} ltm={memory.long_term_count} links={memory.transition_count} "
+            f"merged={memory.merged_count} forgotten={memory.forgotten_count} "
             f"avg_boredom={avg_boredom:.3f} avg_res={avg_res:.3f} "
             f"saccades={self.saccades} mean_gaze_shift={mean_jump:.4f}"
         )
@@ -108,20 +109,37 @@ def _load_session_memory(memory: EpisodicAttractorMemory, args: argparse.Namespa
         print(f"[Memory] Starting fresh (no saved memory at {args.memory_path}).")
 
 
-def _save_session_memory(memory: EpisodicAttractorMemory, args: argparse.Namespace) -> None:
+def _save_session_memory(memory: EpisodicAttractorMemory, args: argparse.Namespace, quiet: bool = False) -> None:
     if args.no_memory_io:
         return
     memory.save(args.memory_path)
-    print(
-        f"[Memory] Saved {memory.count} attractors (LTM={memory.long_term_count}, "
-        f"forgotten={memory.forgotten_count}) -> {args.memory_path}"
-    )
+    if not quiet:
+        print(
+            f"[Memory] Saved {memory.count} attractors (LTM={memory.long_term_count}, "
+            f"links={memory.transition_count}, merged={memory.merged_count}, "
+            f"forgotten={memory.forgotten_count}) -> {args.memory_path}"
+        )
 
 
-def build_brain(backend: str = "auto", device: str | None = None) -> tuple[ThalamusWorkspace, VisualCortex]:
+def _window_closed(win_name: str) -> bool:
+    try:
+        return float(cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE)) < 1.0
+    except cv2.error:
+        return False
+
+
+def build_brain(
+    backend: str = "auto",
+    device: str | None = None,
+    collect_diagnostics: bool = True,
+) -> tuple[ThalamusWorkspace, VisualCortex]:
     memory = EpisodicAttractorMemory(latent_dim=384, max_episodes=50_000)
     thalamus = ThalamusWorkspace(memory=memory)
-    vision = VisualCortex(ventral_backend=backend, device=device)
+    vision = VisualCortex(
+        ventral_backend=backend,
+        device=device,
+        collect_diagnostics=collect_diagnostics,
+    )
     thalamus.register_region(vision)
     return thalamus, vision
 
@@ -156,6 +174,7 @@ def _run_async(
         ventral_backend=args.backend,
         device=args.device,
         on_semantic_packet=bus.publish,
+        collect_diagnostics=observer is not None,
     )
     thalamus.register_region(vision)
 
@@ -205,6 +224,9 @@ def _run_async(
             step += 1
             stats.record(packet.gaze.x, packet.gaze.y, packet.gaze.mode, ws_fb)
 
+            if args.autosave_every > 0 and step % args.autosave_every == 0:
+                _save_session_memory(memory, args, quiet=True)
+
             with frame_lock:
                 # Bind raw frame and its exact reflex packet atomically so GUI gaze never lags/mismatches
                 latest_visual = (step, frame, packet, gt_xy)
@@ -229,6 +251,7 @@ def _run_async(
 
     show_probe = False
     last_drawn_step = -1
+    async_win = "Bio-Brain AI :: Async Multi-Rate Cortex"
     try:
         if observer is None:
             while sensory_thread.is_alive():
@@ -247,11 +270,11 @@ def _run_async(
                         sim_gt_xy=gt_view if sim is not None else None,
                         show_gt_probe=show_probe,
                     )
-                    cv2.imshow("Bio-Brain AI :: Async Multi-Rate Cortex", dash)
+                    cv2.imshow(async_win, dash)
                     last_drawn_step = vis_step
 
                 key = cv2.waitKey(8) & 0xFF
-                if key == ord("q"):
+                if key == ord("q") or (last_drawn_step >= 0 and _window_closed(async_win)):
                     stop_event.set()
                     break
                 if key == ord("r"):
@@ -307,6 +330,12 @@ def main() -> int:
         action="store_true",
         help="Disable disk load/save of episodic memory",
     )
+    parser.add_argument(
+        "--autosave-every",
+        type=int,
+        default=1800,
+        help="Periodically checkpoint memory atomically every N steps (0=disable)",
+    )
     args = parser.parse_args()
 
     observer = None if args.headless else BrainObserver()
@@ -333,13 +362,19 @@ def main() -> int:
     if args.async_brain:
         try:
             return _run_async(args, sim, cap, observer)
+        except KeyboardInterrupt:
+            return 0
         finally:
             if cap is not None:
                 cap.release()
             if observer is not None:
                 cv2.destroyAllWindows()
 
-    thalamus, _ = build_brain(backend=args.backend, device=args.device)
+    thalamus, _ = build_brain(
+        backend=args.backend,
+        device=args.device,
+        collect_diagnostics=observer is not None,
+    )
     _load_session_memory(thalamus.memory, args)
     stats = _RunStats()
     loop_video = args.source != "webcam" and args.max_steps == 0 and not args.headless
@@ -363,10 +398,14 @@ def main() -> int:
                 step += 1
                 stats.record(packet.gaze.x, packet.gaze.y, packet.gaze.mode, workspace)
 
+                if args.autosave_every > 0 and step % args.autosave_every == 0:
+                    _save_session_memory(thalamus.memory, args, quiet=True)
+
                 if args.headless and step % 30 == 0:
                     _log_headless_step(step, packet, workspace)
 
             if observer is not None and last_frame is not None:
+                sync_win = "Bio-Brain AI :: Visual Cortex v1 (No BBox / No Object ID)"
                 dash = observer.render_dashboard(
                     last_frame,
                     packet,
@@ -374,9 +413,9 @@ def main() -> int:
                     sim_gt_xy=gt_xy if sim is not None else None,
                     show_gt_probe=show_probe,
                 )
-                cv2.imshow("Bio-Brain AI :: Visual Cortex v1 (No BBox / No Object ID)", dash)
+                cv2.imshow(sync_win, dash)
                 key = cv2.waitKey(16) & 0xFF
-                if key == ord("q"):
+                if key == ord("q") or _window_closed(sync_win):
                     break
                 if key == ord("r"):
                     thalamus.reset()
@@ -388,6 +427,8 @@ def main() -> int:
 
             if args.max_steps > 0 and step >= args.max_steps:
                 break
+    except KeyboardInterrupt:
+        pass
     finally:
         stats.print_summary(thalamus.memory, "sync")
         _save_session_memory(thalamus.memory, args)

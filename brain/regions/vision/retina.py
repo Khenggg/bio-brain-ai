@@ -52,23 +52,20 @@ class DualResolutionRetina:
             return self.fovea_span * (h / float(w)), self.fovea_span
         return self.fovea_span, self.fovea_span * (w / float(h))
 
-    def _np_to_gpu_tensor(self, img_np: np.ndarray, bgr_input: bool) -> torch.Tensor:
+    def _np_to_tensor(self, img_np: np.ndarray, bgr_input: bool, device: torch.device | str) -> torch.Tensor:
         if bgr_input:
             img_np = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
-        t = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(self.device, dtype=torch.float32)
+        t = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(device, dtype=torch.float32)
         return (t / 255.0).clamp(0.0, 1.0)
 
-    def sample(
-        self, frame: np.ndarray | torch.Tensor, gaze: GazeState, bgr_input: bool = True
-    ) -> tuple[torch.Tensor, torch.Tensor, tuple[float, float]]:
-        """Return (periphery [1,3,P,P], fovea [1,3,F,F], (span_x, span_y))."""
+    def sample_periphery(
+        self, frame: np.ndarray | torch.Tensor, bgr_input: bool = True
+    ) -> tuple[torch.Tensor, tuple[float, float]]:
+        """Sample coarse wide periphery [1,3,P,P] and return (periphery, (span_x, span_y))."""
         if isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.dtype == np.uint8:
             h, w = frame.shape[:2]
             span_x, span_y = self._compute_spans(h, w)
-            cx = float(np.clip(gaze.x, -1.0 + span_x * 0.5, 1.0 - span_x * 0.5))
-            cy = float(np.clip(gaze.y, -1.0 + span_y * 0.5, 1.0 - span_y * 0.5))
-
-            # Fast CPU resize/crop avoids uploading full 1080p float32 frame over PCIe every tick
+            # Fast CPU stride+resize avoids uploading full 1080p float32 frame over PCIe every tick
             stride = max(1, min(h, w) // (self.periphery_size * 2))
             periph_src = frame[::stride, ::stride] if stride > 1 else frame
             periph_np = cv2.resize(
@@ -76,6 +73,33 @@ class DualResolutionRetina:
                 (self.periphery_size, self.periphery_size),
                 interpolation=cv2.INTER_AREA if stride == 1 else cv2.INTER_LINEAR,
             )
+            return self._np_to_tensor(periph_np, bgr_input, self.device), (span_x, span_y)
+
+        img = self.to_tensor(frame, bgr_input=bgr_input)
+        _, _, h, w = img.shape
+        periphery = F.interpolate(
+            img,
+            size=(self.periphery_size, self.periphery_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return periphery, self._compute_spans(h, w)
+
+    def sample_fovea(
+        self,
+        frame: np.ndarray | torch.Tensor,
+        gaze: GazeState,
+        bgr_input: bool = True,
+        need_gpu: bool = True,
+        need_cpu: bool = False,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, tuple[float, float]]:
+        """Crop sharp fovea [1,3,F,F] around gaze; avoids GPU upload or GPU->CPU bounce when skipped."""
+        if isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.dtype == np.uint8:
+            h, w = frame.shape[:2]
+            span_x, span_y = self._compute_spans(h, w)
+            cx = float(np.clip(gaze.x, -1.0 + span_x * 0.5, 1.0 - span_x * 0.5))
+            cy = float(np.clip(gaze.y, -1.0 + span_y * 0.5, 1.0 - span_y * 0.5))
+
             half_wx = max(8, int(round(span_x * 0.5 * w)))
             half_wy = max(8, int(round(span_y * 0.5 * h)))
             px_c = int(round((cx + 1.0) * 0.5 * (w - 1)))
@@ -83,32 +107,25 @@ class DualResolutionRetina:
 
             x0, x1 = px_c - half_wx, px_c + half_wx
             y0, y1 = py_c - half_wy, py_c + half_wy
-            pad_l = max(0, -x0)
-            pad_t = max(0, -y0)
-            pad_r = max(0, x1 - w)
-            pad_b = max(0, y1 - h)
+            pad_l, pad_t = max(0, -x0), max(0, -y0)
+            pad_r, pad_b = max(0, x1 - w), max(0, y1 - h)
             crop = frame[max(0, y0) : min(h, y1), max(0, x0) : min(w, x1)]
             if pad_l or pad_t or pad_r or pad_b:
                 crop = cv2.copyMakeBorder(crop, pad_t, pad_b, pad_l, pad_r, cv2.BORDER_REPLICATE)
             fovea_np = cv2.resize(
                 crop, (self.fovea_size, self.fovea_size), interpolation=cv2.INTER_LINEAR
             )
-            return (
-                self._np_to_gpu_tensor(periph_np, bgr_input),
-                self._np_to_gpu_tensor(fovea_np, bgr_input),
-                (span_x, span_y),
-            )
+            fovea_cpu = self._np_to_tensor(fovea_np, bgr_input, "cpu") if (need_cpu or (need_gpu and self.device.type == "cpu")) else None
+            if need_gpu:
+                fovea_dev = fovea_cpu if self.device.type == "cpu" else (
+                    fovea_cpu.to(self.device) if fovea_cpu is not None else self._np_to_tensor(fovea_np, bgr_input, self.device)
+                )
+            else:
+                fovea_dev = None
+            return fovea_dev, fovea_cpu, (span_x, span_y)
 
         img = self.to_tensor(frame, bgr_input=bgr_input)
         _, _, h, w = img.shape
-
-        periphery = F.interpolate(
-            img,
-            size=(self.periphery_size, self.periphery_size),
-            mode="bilinear",
-            align_corners=False,
-        )
-
         span_x, span_y = self._compute_spans(h, w)
         cx = float(np.clip(gaze.x, -1.0 + span_x * 0.5, 1.0 - span_x * 0.5))
         cy = float(np.clip(gaze.y, -1.0 + span_y * 0.5, 1.0 - span_y * 0.5))
@@ -116,12 +133,17 @@ class DualResolutionRetina:
         grid = self.register_grid.clone()
         grid[..., 0] = cx + grid[..., 0] * span_x
         grid[..., 1] = cy + grid[..., 1] * span_y
-
         fovea = F.grid_sample(
-            img,
-            grid,
-            mode="bilinear",
-            padding_mode="border",
-            align_corners=False,
+            img, grid, mode="bilinear", padding_mode="border", align_corners=False
         )
-        return periphery, fovea, (span_x, span_y)
+        fovea_cpu = fovea.detach().to("cpu") if need_cpu else None
+        return (fovea if need_gpu else None), fovea_cpu, (span_x, span_y)
+
+    def sample(
+        self, frame: np.ndarray | torch.Tensor, gaze: GazeState, bgr_input: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[float, float]]:
+        """Return (periphery [1,3,P,P], fovea [1,3,F,F], (span_x, span_y))."""
+        periphery, span_xy = self.sample_periphery(frame, bgr_input=bgr_input)
+        fovea, _, _ = self.sample_fovea(frame, gaze, bgr_input=bgr_input, need_gpu=True, need_cpu=False)
+        assert fovea is not None
+        return periphery, fovea, span_xy

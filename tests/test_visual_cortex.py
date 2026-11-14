@@ -286,3 +286,58 @@ def test_colliculus_boredom_explores_peripheral_novelty() -> None:
     assert math.hypot(gaze.x - 0.55, gaze.y - 0.35) < 0.35
 
 
+def test_async_cortex_headless_skips_cpu_diagnostic_copies() -> None:
+    frame = np.zeros((180, 240, 3), dtype=np.uint8)
+    with AsyncVisualCortex(
+        ventral_backend="light",
+        device="cpu",
+        collect_diagnostics=False,
+        ventral_calm_interval_s=10.0,
+    ) as cortex:
+        pkt0 = cortex.subconscious_step(frame)
+        assert "fovea" not in pkt0.diagnostics
+        assert "surprise_map" not in pkt0.diagnostics
+        assert pkt0.is_fresh_semantic is True
+
+        # Calm tick skips both Ventral compute and diagnostic tensor copies
+        pkt1 = cortex.subconscious_step(frame)
+        assert pkt1.is_fresh_semantic is False
+        assert cortex.ventral_skipped_calm >= 1
+        assert "fovea" not in pkt1.diagnostics
+        assert "periphery" not in pkt1.diagnostics
+
+
+def test_async_cortex_skips_identical_fovea_passes() -> None:
+    import time
+
+    base = np.full((240, 320, 3), 80, dtype=np.uint8)
+    base[100:140, 140:180] = 200
+    changed_center = base.copy()
+    changed_center[105:135, 145:175] = 20
+
+    with AsyncVisualCortex(
+        ventral_backend="light",
+        device="cpu",
+        collect_diagnostics=False,
+        ventral_surprise_thresh=0.02,
+        ventral_calm_interval_s=0.01,
+    ) as cortex:
+        pkt0 = cortex.subconscious_step(base)
+        assert pkt0.is_fresh_semantic is True
+        assert cortex.ventral_updates == 1
+
+        # Even though calm_interval (10ms) keeps expiring, identical fovea skips redundant Ventral work
+        for _ in range(4):
+            time.sleep(0.02)
+            pkt = cortex.subconscious_step(base)
+            assert pkt.is_fresh_semantic is False
+        cortex.flush(timeout=2.0)
+        assert cortex.ventral_updates == 1
+        assert cortex.ventral_skipped_calm >= 4
+
+        # Changing content inside the fovea immediately passes the gate and updates Ventral
+        cortex.subconscious_step(changed_center)
+        cortex.flush(timeout=2.0)
+        assert cortex.ventral_updates >= 2
+
+
