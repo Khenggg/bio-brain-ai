@@ -85,7 +85,16 @@ class VentralSemanticStream:
         """Encode sharp fovea patch and integrate into continuous temporal latent trajectory."""
         if self._dinov2 is not None:
             normed = (fovea - self._mean) / self._std
-            use_amp = self.device.type == "cuda"
+            use_amp = getattr(self, "_use_amp", None)
+            if use_amp is None:
+                if self.device.type == "cuda":
+                    major, minor = torch.cuda.get_device_capability(self.device)
+                    dev_name = torch.cuda.get_device_name(self.device).upper()
+                    # GTX GPUs (incl. GTX 16xx sm_75) lack Tensor Cores and run ~1.7x faster in pure FP32
+                    use_amp = (major, minor) >= (7, 5) and "GTX" not in dev_name
+                else:
+                    use_amp = False
+                self._use_amp = use_amp
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=use_amp):
                 out = self._dinov2(pixel_values=normed)
                 # Blend CLS token + mean patch representation for rich local + global shape

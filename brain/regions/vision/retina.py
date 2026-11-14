@@ -69,8 +69,12 @@ class DualResolutionRetina:
             cy = float(np.clip(gaze.y, -1.0 + span_y * 0.5, 1.0 - span_y * 0.5))
 
             # Fast CPU resize/crop avoids uploading full 1080p float32 frame over PCIe every tick
+            stride = max(1, min(h, w) // (self.periphery_size * 2))
+            periph_src = frame[::stride, ::stride] if stride > 1 else frame
             periph_np = cv2.resize(
-                frame, (self.periphery_size, self.periphery_size), interpolation=cv2.INTER_AREA
+                periph_src,
+                (self.periphery_size, self.periphery_size),
+                interpolation=cv2.INTER_AREA if stride == 1 else cv2.INTER_LINEAR,
             )
             half_wx = max(8, int(round(span_x * 0.5 * w)))
             half_wy = max(8, int(round(span_y * 0.5 * h)))

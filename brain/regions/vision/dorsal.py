@@ -51,9 +51,11 @@ class DorsalMotionStream:
         periphery_size: int = 96,
         device: torch.device | str = "cpu",
         online_lr: float = 2e-3,
+        online_update_interval: int = 3,
     ) -> None:
         self.periphery_size = periphery_size
         self.device = torch.device(device)
+        self.online_update_interval = max(1, int(online_update_interval))
 
         self.predictor = _PredictiveConvGRU(in_ch=4, hidden_ch=16).to(self.device)
         self.optimizer = torch.optim.AdamW(self.predictor.parameters(), lr=online_lr, weight_decay=1e-4)
@@ -71,6 +73,7 @@ class DorsalMotionStream:
         self._hidden: torch.Tensor | None = None
         self._prev_surprise: torch.Tensor | None = None
         self._habituation_floor: torch.Tensor | None = None
+        self._step_count: int = 0
 
     @staticmethod
     def _make_gaussian_kernel(kernel_size: int, sigma: float) -> torch.Tensor:
@@ -173,13 +176,22 @@ class DorsalMotionStream:
         inst_diff = (x_t - aligned_prev).abs().mean(dim=1, keepdim=True) * pan_mask
 
         # 2. Online predictive coding step: predict x_t from aligned (x_{t-1}, h_{t-1})
-        self.predictor.train()
-        pred_t, h_next = self.predictor(aligned_prev, aligned_hidden)
-        loss = F.smooth_l1_loss(pred_t * pan_mask, x_t * pan_mask)
-        self.optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        nn.utils.clip_grad_norm_(self.predictor.parameters(), max_norm=1.0)
-        self.optimizer.step()
+        self._step_count += 1
+        should_update = (self._step_count <= 4) or (
+            self._step_count % self.online_update_interval == 0
+        )
+        if should_update:
+            self.predictor.train()
+            pred_t, h_next = self.predictor(aligned_prev, aligned_hidden)
+            loss = F.smooth_l1_loss(pred_t * pan_mask, x_t * pan_mask)
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.predictor.parameters(), max_norm=1.0)
+            self.optimizer.step()
+        else:
+            self.predictor.eval()
+            with torch.no_grad():
+                pred_t, h_next = self.predictor(aligned_prev, aligned_hidden)
 
         with torch.no_grad():
             pred_err = (x_t - pred_t.detach()).abs().mean(dim=1, keepdim=True) * pan_mask
@@ -242,3 +254,4 @@ class DorsalMotionStream:
         self._hidden = None
         self._prev_surprise = None
         self._habituation_floor = None
+        self._step_count = 0
