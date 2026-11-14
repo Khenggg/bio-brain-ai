@@ -12,6 +12,8 @@ build/
 wheels/
 models/
 video/
+data/
+*.npz
 *.part
 *.whl
 *.safetensors

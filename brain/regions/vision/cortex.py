@@ -72,8 +72,11 @@ class VisualCortex(BrainRegion):
         # 2. Dorsal stream predicts periphery dynamics & cancels static/repetitive clutter
         surprise_map, surprise_peak, motion_energy, flow_xy = self.dorsal.step(periphery)
 
-        # 3. Superior Colliculus shifts gaze unconsciously (saccade / smooth pursuit)
-        gaze, peak_xy, effective_salience = self.colliculus.step(surprise_map, flow_xy=flow_xy)
+        # 3. Superior Colliculus shifts gaze unconsciously (modulated by top-down boredom)
+        topdown_boredom = feedback.familiarity_boredom if feedback is not None else 0.0
+        gaze, peak_xy, effective_salience = self.colliculus.step(
+            surprise_map, flow_xy=flow_xy, topdown_boredom=topdown_boredom
+        )
 
         # 4. Resample fovea at updated gaze when an abrupt saccade occurred for crisp perception
         if gaze.mode == "saccade":

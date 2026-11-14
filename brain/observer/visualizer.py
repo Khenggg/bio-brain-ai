@@ -110,20 +110,35 @@ class BrainObserver:
         status_col = (80, 240, 140) if workspace.conscious_ignition else (150, 160, 175)
         cv2.putText(p4, f"4. Thalamus: {status_txt}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_col, 2)
 
+        rates = workspace.region_rates_hz
+        boredom = workspace.familiarity_boredom
+        mood_tag = "BORED/EXPLORE" if boredom >= 0.45 else ("FAMILIAR" if boredom >= 0.18 else "CURIOUS")
+        rate_line = (
+            f"Rates: R={rates.get('vision.reflex', 0.0):.0f}Hz | "
+            f"V={rates.get('vision.ventral', 0.0):.0f}Hz | "
+            f"Th={rates.get('thalamus', 0.0):.0f}Hz"
+            if rates
+            else "Controls: [Q] Quit  [R] Reset Brain  [M] Probe  [Space] Pause"
+        )
         stats = [
             f"Step: {workspace.step_id} | Latency: {packet.diagnostics['latency_ms']:.1f} ms",
             f"Device: {packet.diagnostics['device']} | VRAM: {packet.diagnostics['vram_mb']:.1f} MB",
             f"Ignition: {workspace.ignition_strength:.3f} / Thresh: {workspace.adaptive_threshold:.3f}",
-            f"Memory Resonance: {workspace.memory_resonance:.3f} | Attractors: {workspace.memory_episode_count}",
-            "Controls: [Q] Quit  [R] Reset Brain  [M] Probe  [Space] Pause",
+            (
+                f"Res: {workspace.memory_resonance:.3f} | "
+                f"Kept: {workspace.memory_episode_count} (LTM:{workspace.long_term_episode_count}) | "
+                f"Forgot: {workspace.forgotten_count}"
+            ),
+            f"Boredom: {boredom:.2f} [{mood_tag}] | EpStr: {workspace.active_episode_strength:.2f}",
+            rate_line,
         ]
         for idx, line in enumerate(stats):
             cv2.putText(
                 p4,
                 line,
-                (12, 62 + idx * 24),
+                (12, 56 + idx * 22),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.46,
+                0.45,
                 (215, 220, 230),
                 1,
             )

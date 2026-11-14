@@ -14,7 +14,7 @@ Thay vì tiếp cận theo kỹ thuật Computer Vision truyền thống (`YOLO`
          │
          ▼
 ┌──────────────────────────────────────────────────────────┐
-│ KHỐI THỊ GIÁC (Visual Cortex - GPU GTX 1650 Ti FP16)     │
+│ KHỐI THỊ GIÁC (Visual Cortex - GPU GTX 1650 Ti FP32)     │
 │                                                          │
 │  1. DualResolutionRetina                                 │
 │     ├─► Periphery (96x96)  ──► DorsalMotionStream        │
@@ -26,24 +26,45 @@ Thay vì tiếp cận theo kỹ thuật Computer Vision truyền thống (`YOLO`
 │     │                     (Saccade / Pursuit / IOR)      │
 │     │                               │                    │
 │     └─► Fovea (140x140) ◄── Điều khiển hướng nhìn (gx,gy)│
-│             │                                            │
+│             │  (Async 1-slot Mailbox + CUDA Stream)      │
 │             ▼                                            │
 │     VentralSemanticStream                                │
-│     (DINOv2-S FP16 / Light Encoder + Temporal Binder)    │
+│     (DINOv2-S / Light Encoder + Temporal Binder)         │
 └──────────────────────────┬───────────────────────────────┘
-                           │ SensoryPacket (Latent + Surprise)
+                           │ Async SensoryPackets
                            ▼
 ┌──────────────────────────────────────────────────────────┐
-│ ĐỒI THỊ & KÝ ỨC (Thalamus + Memory - CPU 8T + 24 GB RAM) │
-│  - Global Latent Workspace (Gating vô thức -> ý thức)    │
-│  - EpisodicAttractorMemory (FAISS / Cosine Attractor)    │
-│  - Giao tiếp chuẩn BrainRegion cho Âm thanh / Suy nghĩ   │
+│ ĐỒI THỊ & KÝ ỨC (AsyncThalamusBus + Memory - CPU 8T/RAM) │
+│  - Event-driven Global Latent Workspace & Familiarity    │
+│  - EpisodicAttractorMemory (.npz Lưu/Quên sinh học)      │
+│  - Hồi tiếp Top-Down Boredom xuống Colliculus & Thị giác │
+│  - Giao tiếp chuẩn BrainRegion cho Âm thanh / Nội cảm    │
 └──────────────────────────────────────────────────────────┘
 ```
 
-## 3. Lộ trình mở rộng đa khối
-- **Phase 1 (Hiện tại):** Khối Thị giác (`brain/regions/vision/`) + Đồi thị (`brain/core/workspace.py`) + Ký ức liên kết (`brain/core/memory.py`).
-- **Phase 2:** Ký ức chuỗi & Dự đoán quỹ đạo không gian ẩn (giữ quán tính khi vật thể bị che khuất, củng cố ký ức lúc nhàn rỗi).
-- **Phase 3:** Khối Âm thanh (`AuditoryCortex`) & Liên kết đa giác quan tại Đồi thị.
-- **Phase 4:** Tách Đồi thị / Event Bus sang Rust + Shared Memory để chạy đa khối bất đồng bộ không giới hạn GIL.
-- **Phase 5:** Khối Tư duy & Chú ý có chủ đích (*Top-Down Attention* + cổng ngôn ngữ tùy chọn).
+## 3. Lộ trình 5 Chương / 10 Chặng Tiến Hóa Nhận Thức
+
+### Chương 1 — Tri giác, Bất đồng bộ & Ký ức Sống
+- **Chặng 1.1 (Xong):** Khối Thị giác vô thức (`brain/regions/vision/`) + Đồi thị (`brain/core/workspace.py`) + Ký ức liên kết (`brain/core/memory.py`).
+- **Chặng 1.2 / 1.5 (Xong):** Kiến trúc Bất đồng bộ Đa nhịp (`AsyncVisualCortex` trên 2 CUDA Streams + `AsyncThalamusBus`).
+- **Chặng 1.3 (Xong):**
+  - **Ký ức có Lưu, Quên & Cố định dài hạn (*LTM Consolidation*):** Củng cố hố hút khi gặp lại, suy giảm và đào thải ký ức thoáng qua (`forgotten_count`), đồng thời **cố định bền vững** ký ức cốt lõi lặp lại (`hits >= 4` hoặc bền `>= 0.95`) xuống ngưỡng sàn dài hạn (`ltm_floor = 0.35`), kèm lưu/nạp liên phiên qua `.npz` (mặc định `data/episodic_memory.npz`).
+  - **Chán quen Top-Down (*Familiarity Boredom*):** Hồi tiếp mức độ quen thuộc từ Đồi thị xuống `Colliculus` để giảm dính điểm nhìn trung tâm (*local lock*), tăng IOR tại chỗ và kích thích mắt khám phá ngoại vi mới mẻ.
+
+### Chương 2 — Tưởng tượng & Giấc mơ (*Internal World Model*)
+- **Chặng 2.1 — Tự sinh hình ảnh (*Visual Imagery*):** Giải mã ngược từ không gian ẩn (`Latent -> Visual Canvas`) giúp não tự "hình dung" vật thể trong trí nhớ khi không có kích thích từ camera.
+- **Chặng 2.2 — Tự sinh chuyển động / Mơ (*Dreaming & Temporal Rollout*):** Mô phỏng quỹ đạo chuyển động theo thời gian trong trạng thái nhàn rỗi/ngủ để tái hiện và củng cố ký ức.
+
+### Chương 3 — Ý thức Bản thân & Tự giám sát (*Self & Meta-Cognition*)
+- **Chặng 3.1 — Hiểu bản thân là gì (*Minimal Self & Efference Copy*):** Phân biệt chuyển động do tự thân gây ra (*Self-caused*, như liếc mắt) với chuyển động của thế giới bên ngoài (*World-caused*).
+- **Chặng 3.2 — Hiểu mình đang làm gì (*Meta-Cognition*):** Tự theo dõi trạng thái chú ý, mức độ bối rối/tự tin và nguyên nhân chuyển hướng quan tâm của chính hệ thống.
+
+### Chương 4 — Nội cảm & Cảm xúc Cân bằng Nội môi (*Homeostasis & Affect*)
+- **Chặng 4.1 — Bình thường (*Homeostasis Baseline*):** Trạng thái cân bằng năng lượng — bất ngờ — ký ức ở ngưỡng ổn định.
+- **Chặng 4.2 — Vui vẻ / Hứng thú (*Curiosity & Reward*):** Tín hiệu phần thưởng nội tại khi khám phá được cấu trúc mới mà mô hình nội bộ học dần nắm bắt được.
+- **Chặng 4.3 — Buồn bã / Thiếu kích thích (*Deprivation & Low Drive*):** Suy giảm động lực khi môi trường nghèo nàn thông tin hoặc cạn kiệt sự mới lạ dài hạn.
+- **Chặng 4.4 — Đau đớn / Báo động sinh tồn (*Nociception & Conflict Signal*):** Xung báo động ưu tiên cao khi gặp xung đột cảm giác nặng, lỗi dự đoán mất kiểm soát hoặc nguy cơ vượt giới hạn an toàn.
+
+### Chương 5 — Đa giác quan & Ngôn ngữ Nền tảng
+- **Chặng 5.1 — Thính giác (`AuditoryCortex`):** Liên kết đa giác quan (hình ảnh + âm thanh) đồng bộ tại Đồi thị.
+- **Chặng 5.2 — Ngôn ngữ nền tảng (*Grounded Language*):** Gắn nhãn ngôn ngữ từ trải nghiệm giác quan và trạng thái nội cảm (không tách rời thế giới thực).

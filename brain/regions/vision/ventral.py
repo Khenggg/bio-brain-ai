@@ -74,6 +74,21 @@ class VentralSemanticStream:
         # Temporal binding attractor (replaces discrete object IDs with continuous presence)
         self._bound_state: torch.Tensor | None = None
 
+    @staticmethod
+    def attach_kinematics(
+        vec: torch.Tensor,
+        surprise_energy: float,
+        gaze_vx: float,
+        gaze_vy: float,
+    ) -> torch.Tensor:
+        """Fold subtle motion-kinematic resonance into latent without losing semantic identity."""
+        base = F.normalize(vec.squeeze(0), dim=-1)
+        motion_sig = torch.zeros_like(base)
+        motion_sig[0] = float(gaze_vx) * 2.0
+        motion_sig[1] = float(gaze_vy) * 2.0
+        motion_sig[2] = float(surprise_energy)
+        return F.normalize(base + 0.08 * motion_sig, dim=-1)
+
     @torch.no_grad()
     def encode(
         self,
@@ -105,13 +120,7 @@ class VentralSemanticStream:
             assert self._light_encoder is not None
             raw_vec = self._light_encoder(fovea).float()
 
-        # Fold subtle motion-kinematic resonance into latent tail without destroying semantic similarity
-        raw_vec = F.normalize(raw_vec.squeeze(0), dim=-1)
-        motion_sig = torch.zeros_like(raw_vec)
-        motion_sig[0] = float(gaze_vx) * 2.0
-        motion_sig[1] = float(gaze_vy) * 2.0
-        motion_sig[2] = float(surprise_energy)
-        combined = F.normalize(raw_vec + 0.08 * motion_sig, dim=-1)
+        combined = self.attach_kinematics(raw_vec, surprise_energy, gaze_vx, gaze_vy)
 
         if self._bound_state is None:
             self._bound_state = combined

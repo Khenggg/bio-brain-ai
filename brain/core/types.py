@@ -31,6 +31,8 @@ class SensoryPacket:
     salience_peak_xy: tuple[float, float]
     gaze: GazeState
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    modality_event: str = "tick"  # tick | reflex | saccade | semantic
+    is_fresh_semantic: bool = True
 
 
 @dataclass(slots=True)
@@ -45,3 +47,10 @@ class WorkspaceState:
     memory_episode_count: int
     adaptive_threshold: float
     subconscious_regions: dict[str, float] = field(default_factory=dict)
+    source_region: str = ""
+    region_rates_hz: dict[str, float] = field(default_factory=dict)
+    familiarity_boredom: float = 0.0
+    forgotten_count: int = 0
+    long_term_episode_count: int = 0
+    active_episode_idx: int = -1
+    active_episode_strength: float = 0.0
